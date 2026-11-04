@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   # The By-Product tab calls the GeoChem API live, so the host must be able
   # to reach GEOCHEM_API_ENDPOINT (ISI VPN) while the dashboard is running --
@@ -10,9 +12,10 @@ services:
     image: minmod-dashboard
     ports:
       - "8050:8050"
-    environment:
-      - API_ENDPOINT=${API_ENDPOINT:-https://minmod.isi.edu/api/v1}
-      - SPARQL_ENDPOINT=${SPARQL_ENDPOINT:-https://minmod.isi.edu/sparql}
+    environment: 
+      - API_ENDPOINT=${API_ENDPOINT}
+      - SPARQL_ENDPOINT=${SPARQL_ENDPOINT}
       - GEOCHEM_API_ENDPOINT=${GEOCHEM_API_ENDPOINT:-http://dev.minmod.isi.edu/api/v1}
       - GEOCHEM_ELEMENTS_CSV_URL=${GEOCHEM_ELEMENTS_CSV_URL:-https://raw.githubusercontent.com/usc-isi-i2/ta2-minmod-kg/main/minmodkg/misc/elements.csv}
     command: "poetry run python app.py"
+

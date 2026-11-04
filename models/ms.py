@@ -1,7 +1,8 @@
 import pandas as pd
 from helpers import dataservice_utils
 from helpers.exceptions import EmptyDedupDataFrame
-from constants import API_ENDPOINT, FRONTEND_ENDPOINT
+from constants import API_ENDPOINT
+# from constants import FRONTEND_ENDPOINT  # local runs only, see constants.py
 import asyncio
 
 
@@ -61,7 +62,8 @@ class MineralSite:
         for data in raw_data:
 
             combined_data = {}
-            combined_data["ms"] = "/".join([FRONTEND_ENDPOINT,"derived", data["id"]])
+            combined_data["ms"] = "/".join(["/derived", data["id"]])
+            # combined_data["ms"] = "/".join([FRONTEND_ENDPOINT, "derived", data["id"]])  # local runs only
             combined_data["ms_name"] = data["name"]
             combined_data["ms_type"] = data["type"]
             combined_data["ms_rank"] = data["rank"]
