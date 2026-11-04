@@ -17,6 +17,11 @@ GRID_STYLE = {"width": "100%", "height": "50vh"}
 layout = html.Div(
     [
         dcc.Location(id="url-byproduct", refresh=True),
+        # The selected deposit, kept outside the deposits grid: the grid only
+        # exists once a paper is picked, and a callback whose Input is missing
+        # from the layout errors in the browser when its other Input (the BDL
+        # switch) fires.
+        dcc.Store(id="bp-selected-deposit"),
         dbc.Row(
             [
                 dbc.Col(
@@ -76,7 +81,22 @@ layout = html.Div(
             )
         ),
         html.Br(),
-        html.H5("Samples"),
+        # The switch lives outside bp-samples-results so it keeps its state when
+        # the grid is rebuilt on each deposit click.
+        dbc.Row(
+            [
+                dbc.Col(html.H5("Samples"), width="auto"),
+                dbc.Col(
+                    dbc.Switch(
+                        id="bp-include-bdl",
+                        label="Include below-detection readings",
+                        value=True,
+                    ),
+                    className="d-flex justify-content-end",
+                ),
+            ],
+            align="center",
+        ),
         dbc.Row(
             dbc.Spinner(
                 html.Div(id="bp-samples-results"),
@@ -241,13 +261,14 @@ def bp_load_commodities(pathname):
     Output("bp-deposits-results", "children"),
     Output("bp-samples-results", "children"),
     Output("bp-summary-results", "children"),
+    Output("bp-selected-deposit", "data", allow_duplicate=True),
     Input("bp-commodity", "value"),
     Input("bp-country", "value"),
     prevent_initial_call=True,
 )
 def bp_update_papers(commodity, country):
     if not commodity:
-        return [], html.Div(), html.Div(), html.Div(), html.Div()
+        return [], html.Div(), html.Div(), html.Div(), html.Div(), None
 
     # One try around both calls -- either failing means the same thing to
     # the user.
@@ -256,60 +277,76 @@ def bp_update_papers(commodity, country):
         papers = api.get_papers(commodity, country)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem papers for %s", commodity)
-        return [], _error_alert(exc), html.Div(), html.Div(), html.Div()
+        return [], _error_alert(exc), html.Div(), html.Div(), html.Div(), None
 
     papers_grid = _build_papers_grid(papers) if papers else _no_results_alert()
 
     # A new commodity/country selection invalidates the old paper-level
-    # summary, same as Deposits and Samples.
-    return country_options, papers_grid, html.Div(), html.Div(), html.Div()
+    # summary and deposit selection, same as Deposits and Samples.
+    return country_options, papers_grid, html.Div(), html.Div(), html.Div(), None
 
 
 @callback(
     Output("bp-deposits-results", "children", allow_duplicate=True),
     Output("bp-samples-results", "children", allow_duplicate=True),
     Output("bp-summary-results", "children", allow_duplicate=True),
+    Output("bp-selected-deposit", "data", allow_duplicate=True),
     Input("bp-papers-grid", "selectedRows"),
     State("bp-commodity", "value"),
     prevent_initial_call=True,
 )
 def bp_update_deposits(selected_rows, commodity):
     if not selected_rows or not commodity:
-        return html.Div(), html.Div(), html.Div()
+        return html.Div(), html.Div(), html.Div(), None
 
     paper_id = selected_rows[0]["paper_id"]
     try:
         deposits = api.get_deposits(paper_id, commodity)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem deposits for %s", paper_id)
-        return _error_alert(exc), html.Div(), html.Div()
+        return _error_alert(exc), html.Div(), html.Div(), None
 
     deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
 
     # The summary describes one deposit, and selecting a new paper leaves none
     # selected -- so it clears here and is filled by bp_update_samples.
-    return deposits_grid, html.Div(), html.Div()
+    return deposits_grid, html.Div(), html.Div(), None
+
+
+@callback(
+    Output("bp-selected-deposit", "data"),
+    Input("bp-deposits-grid", "selectedRows"),
+    prevent_initial_call=True,
+)
+def bp_select_deposit(selected_rows):
+    return selected_rows[0] if selected_rows else None
 
 
 @callback(
     Output("bp-samples-results", "children", allow_duplicate=True),
     Output("bp-summary-results", "children", allow_duplicate=True),
-    Input("bp-deposits-grid", "selectedRows"),
+    Input("bp-selected-deposit", "data"),
+    Input("bp-include-bdl", "value"),
     State("bp-commodity", "value"),
     prevent_initial_call=True,
 )
-def bp_update_samples(selected_rows, commodity):
-    if not selected_rows or not commodity:
+def bp_update_samples(deposit, include_bdl, commodity):
+    if not deposit or not commodity:
         return html.Div(), html.Div()
 
-    paper_id = selected_rows[0]["paper_id"]
-    site_id = selected_rows[0]["site_id"]
-    deposit_name = selected_rows[0].get("deposit_name")
+    paper_id = deposit["paper_id"]
+    site_id = deposit["site_id"]
+    deposit_name = deposit.get("deposit_name")
     try:
         samples = api.get_samples(paper_id, site_id, commodity)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem samples for %s", site_id)
         return _error_alert(exc), html.Div()
+
+    # Switch on: positive, below-detection (negative) and zero grades.
+    # Switch off: detected (positive) grades only. Blanks never reach here.
+    if not include_bdl:
+        samples = api.detected_only(samples)
 
     samples_grid = _build_samples_grid(samples) if samples else _no_results_alert()
     # Derived from the rows just fetched, so the summary cannot disagree with

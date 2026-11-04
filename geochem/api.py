@@ -366,17 +366,30 @@ def get_deposits(paper_id: str, element: str) -> list[dict]:
     return deposits
 
 
+@_ttl_cache(ttl_seconds=900)
 def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
-    """Every reading of `element` on the samples of `site_id`.
+    """Every graded reading of `element` on the samples of `site_id`.
+
+    Fetches *all* the site's samples, with no element or include_bdl filter:
+    grade filtering is done here, not by the API. The API's element filter
+    never returns a sample whose only readings are zero, and include_bdl
+    returns matching samples whole, so neither can express the tab's rules.
+    The caller applies `detected_only` for the BDL switch.
+
+    Returns positive, negative (below detection limit: "<0.4" is stored as
+    -0.4) and zero grades. Blank grades (no value) are always dropped.
 
     The API returns whole samples (every element they measured), so this
     flattens sample -> analyses -> elements and keeps the selected element's
     readings. One row per reading, NOT aggregated: repeated spot analyses on
     one sample (e.g. 146 Ga spots) are real LA-ICP-MS data.
+
+    Cached so that flipping the BDL switch only re-filters rows already held;
+    the unfiltered response for a large site is ~28 MB.
     """
     data = _get(
         f"/papers/{paper_id}/samples",
-        {"site_id": site_id, "element": element, "include_bdl": "true", "limit": 0},
+        {"site_id": site_id, "limit": 0},
         timeout=TIMEOUT_SAMPLES,
     )
 
@@ -390,6 +403,9 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
             for ei, reading in enumerate(analysis.get("elements") or []):
                 if reading.get("is_deleted") or element_symbol(reading.get("label")) != element:
                     continue
+                grade = to_float(reading.get("grade"))
+                if grade is None:
+                    continue
                 samples.append(
                     {
                         # The API has no per-reading id. The position within
@@ -400,7 +416,7 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
                         "sample_name": sample.get("sample_name"),
                         "mineral": sample.get("mineral"),
                         "analysis_id": analysis.get("analysis_id"),
-                        "grade": to_float(reading.get("grade")),
+                        "grade": grade,
                         "analytical_method": analysis.get("analytical_method"),
                     }
                 )
@@ -408,6 +424,14 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
         key=lambda s: (_nulls_last(s["sample_name"]), _nulls_last(s["analysis_id"]))
     )
     return samples
+
+
+def detected_only(samples: list[dict]) -> list[dict]:
+    """The rows with a detected grade (> 0): no zero or below-detection values.
+
+    Returns a new list; `samples` may be a cached value and is not modified.
+    """
+    return [s for s in samples if s["grade"] > 0]
 
 
 def summarize_grades(samples: list[dict], commodity: str) -> dict:
