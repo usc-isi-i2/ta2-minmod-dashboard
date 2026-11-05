@@ -53,24 +53,31 @@ def _fetch(
     url: str,
     params: dict | None,
     timeout: int,
-    service: str = "the GeoChem data service",
-    hint: str = " Check that you are connected to the ISI VPN.",
+    service: str = "GeoChem data service",
 ) -> requests.Response:
+    # Messages are shown to the person viewing the page, but it is the
+    # dashboard server's connection that fails -- so they say what is wrong,
+    # not what the viewer should do. Server-side hints go to the log.
     try:
         resp = _SESSION.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
         return resp
     except requests.exceptions.Timeout:
         raise GeochemAPIError(
-            f"{service.capitalize()} did not respond within {timeout}s. "
+            f"{service[0].upper()}{service[1:]} did not respond within {timeout}s. "
             "It may be under heavy load -- please try again."
         )
     except requests.exceptions.ConnectionError:
-        raise GeochemAPIError(f"Cannot reach {service}.{hint}")
+        logger.error(
+            "Cannot reach %s -- check the dashboard server's network / ISI VPN", url
+        )
+        raise GeochemAPIError(f"{service[0].upper()}{service[1:]} is unreachable.")
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "?"
         logger.exception("HTTP %s from %s", status, url)
-        raise GeochemAPIError(f"{service.capitalize()} returned an error (HTTP {status}).")
+        raise GeochemAPIError(
+            f"{service[0].upper()}{service[1:]} returned an error (HTTP {status})."
+        )
 
 
 def _get(path: str, params: dict | None = None, timeout: int = TIMEOUT):
@@ -193,7 +200,7 @@ def _elements() -> tuple[list[dict], dict[str, str]]:
     symbol, name or alias to symbol -- the same rule as the API's
     `element_symbol`, so `aluminium` and `Al` both resolve to `Al`.
     """
-    resp = _fetch(GEOCHEM_ELEMENTS_CSV_URL, None, TIMEOUT, service="the element list", hint="")
+    resp = _fetch(GEOCHEM_ELEMENTS_CSV_URL, None, TIMEOUT, service="the element list")
     rows = list(csv.DictReader(io.StringIO(resp.text)))
     if not rows or not {"symbol", "name", "aliases"} <= set(rows[0]):
         logger.error("Unexpected element list format from %s", GEOCHEM_ELEMENTS_CSV_URL)
@@ -417,6 +424,7 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
                         "mineral": sample.get("mineral"),
                         "analysis_id": analysis.get("analysis_id"),
                         "grade": grade,
+                        "grade_unit": (reading.get("grade_unit") or {}).get("observed_name"),
                         "analytical_method": analysis.get("analytical_method"),
                     }
                 )
@@ -432,6 +440,18 @@ def detected_only(samples: list[dict]) -> list[dict]:
     Returns a new list; `samples` may be a cached value and is not modified.
     """
     return [s for s in samples if s["grade"] > 0]
+
+
+def common_unit(samples: list[dict]) -> str | None:
+    """The grade unit shared by every row, or None if they differ or any is missing.
+
+    Units are read from each reading's grade_unit; every reading in the store
+    is ppm today, but nothing guarantees it for future papers.
+    """
+    units = {s.get("grade_unit") for s in samples}
+    if len(units) == 1:
+        return next(iter(units))
+    return None
 
 
 def summarize_grades(samples: list[dict], commodity: str) -> dict:

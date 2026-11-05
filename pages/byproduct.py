@@ -50,6 +50,9 @@ layout = html.Div(
                 ),
             ]
         ),
+        # Shown when the commodity list itself can't be loaded, so an empty
+        # dropdown doesn't read as "no data".
+        html.Div(id="bp-commodity-alert", className="mt-2"),
         html.Br(),
         html.H5("Papers"),
         dbc.Row(
@@ -185,12 +188,23 @@ def _build_deposits_grid(deposits):
 
 
 def _build_samples_grid(samples):
+    # The unit comes from each reading's grade_unit. When the deposit's
+    # readings share one unit it goes in the header, as "Grade (ppm)";
+    # otherwise each row shows its own unit in a Unit column.
+    unit = api.common_unit(samples)
+    has_units = any(s.get("grade_unit") for s in samples)
+    grade_columns = [
+        {"headerName": f"Grade ({unit})" if unit else "Grade", "field": "grade"}
+    ]
+    if has_units and not unit:
+        grade_columns.append({"headerName": "Unit", "field": "grade_unit"})
+
     column_defs = [
         {"headerName": "Sample ID", "field": "sample_id"},
         {"headerName": "Sample Name", "field": "sample_name"},
         {"headerName": "Sample Mineral", "field": "mineral"},
         {"headerName": "Analysis ID", "field": "analysis_id"},
-        {"headerName": "Grade(ppm)", "field": "grade"},
+        *grade_columns,
         {"headerName": "Method", "field": "analytical_method"},
     ]
     return AgGrid(
@@ -210,10 +224,23 @@ def _build_samples_grid(samples):
     )
 
 
-def _build_grade_summary(stats, deposit_name=None):
+def _build_grade_summary(stats, deposit_name=None, mixed_units=None):
     commodity = api.element_name(stats["commodity"])
     # A site's name is optional in the API, so it can be missing.
     heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
+
+    # Min/avg across different units would be meaningless.
+    if mixed_units:
+        units = ", ".join(sorted(u or "unknown" for u in mixed_units))
+        return html.Div(
+            [
+                html.H5(heading),
+                dbc.Alert(
+                    f"Grade units differ at this deposit ({units}); summary not calculated.",
+                    color="warning",
+                ),
+            ]
+        )
 
     if stats["count"] == 0:
         return html.Div(
@@ -243,20 +270,22 @@ def _build_grade_summary(stats, deposit_name=None):
 
 @callback(
     Output("bp-commodity", "options"),
+    Output("bp-commodity-alert", "children"),
     Input("url-byproduct", "pathname"),
 )
 def bp_load_commodities(pathname):
     # Must degrade rather than raise: if this throws, the page renders
     # nothing at all, not even the layout.
     try:
-        return api.get_commodities()
-    except api.GeochemAPIError:
+        return api.get_commodities(), None
+    except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem commodities")
-        return []
+        return [], _error_alert(exc)
 
 
 @callback(
     Output("bp-country", "options"),
+    Output("bp-country", "value"),
     Output("bp-papers-results", "children"),
     Output("bp-deposits-results", "children"),
     Output("bp-samples-results", "children"),
@@ -267,8 +296,16 @@ def bp_load_commodities(pathname):
     prevent_initial_call=True,
 )
 def bp_update_papers(commodity, country):
+    # A new commodity starts unfiltered: the previous country is cleared
+    # rather than carried into the first papers request.
+    if dash.ctx.triggered_id == "bp-commodity":
+        country = None
+        country_value = None
+    else:
+        country_value = dash.no_update
+
     if not commodity:
-        return [], html.Div(), html.Div(), html.Div(), html.Div(), None
+        return [], country_value, html.Div(), html.Div(), html.Div(), html.Div(), None
 
     # One try around both calls -- either failing means the same thing to
     # the user.
@@ -277,13 +314,21 @@ def bp_update_papers(commodity, country):
         papers = api.get_papers(commodity, country)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem papers for %s", commodity)
-        return [], _error_alert(exc), html.Div(), html.Div(), html.Div(), None
+        return [], country_value, _error_alert(exc), html.Div(), html.Div(), html.Div(), None
 
     papers_grid = _build_papers_grid(papers) if papers else _no_results_alert()
 
     # A new commodity/country selection invalidates the old paper-level
     # summary and deposit selection, same as Deposits and Samples.
-    return country_options, papers_grid, html.Div(), html.Div(), html.Div(), None
+    return (
+        country_options,
+        country_value,
+        papers_grid,
+        html.Div(),
+        html.Div(),
+        html.Div(),
+        None,
+    )
 
 
 @callback(
@@ -351,8 +396,11 @@ def bp_update_samples(deposit, include_bdl, commodity):
     samples_grid = _build_samples_grid(samples) if samples else _no_results_alert()
     # Derived from the rows just fetched, so the summary cannot disagree with
     # the grid below it.
+    detected_units = {s.get("grade_unit") for s in api.detected_only(samples)}
     summary = _build_grade_summary(
-        api.summarize_grades(samples, commodity), deposit_name
+        api.summarize_grades(samples, commodity),
+        deposit_name,
+        mixed_units=detected_units if len(detected_units) > 1 else None,
     )
 
     return samples_grid, summary
