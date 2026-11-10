@@ -13,14 +13,16 @@ dash.register_page(__name__, path="/byproduct", name="By-Product Data")
 
 DEFAULT_COL_DEF = {"resizable": True, "sortable": True, "filter": True}
 GRID_STYLE = {"width": "100%", "height": "50vh"}
+HIDDEN = {"display": "none"}
 
 layout = html.Div(
     [
         dcc.Location(id="url-byproduct", refresh=True),
-        # The selected deposit, kept outside the deposits grid: the grid only
-        # exists once a paper is picked, and a callback whose Input is missing
-        # from the layout errors in the browser when its other Input (the BDL
-        # switch) fires.
+        # The selected paper and deposit, kept outside their grids: a grid only
+        # exists once the step above it is picked, and a callback whose Input
+        # is missing from the layout errors in the browser when one of its
+        # other Inputs (the BDL switch, the commodity) fires.
+        dcc.Store(id="bp-selected-paper"),
         dcc.Store(id="bp-selected-deposit"),
         dbc.Row(
             [
@@ -53,60 +55,96 @@ layout = html.Div(
         # Shown when the commodity list itself can't be loaded, so an empty
         # dropdown doesn't read as "no data".
         html.Div(id="bp-commodity-alert", className="mt-2"),
-        html.Br(),
-        html.H5("Papers"),
-        dbc.Row(
-            dbc.Spinner(
-                html.Div(id="bp-papers-results"),
-                color="primary",
-                type="border",
-                size="lg",
-            )
-        ),
-        html.Br(),
-        html.H5("Deposits"),
-        dbc.Row(
-            dbc.Spinner(
-                html.Div(id="bp-deposits-results"),
-                color="primary",
-                type="border",
-                size="lg",
-            )
-        ),
-        html.Br(),
-        html.H5("Grade Summary"),
-        dbc.Row(
-            dbc.Spinner(
-                html.Div(id="bp-summary-results"),
-                color="primary",
-                type="border",
-                size="lg",
-            )
-        ),
-        html.Br(),
-        # The switch lives outside bp-samples-results so it keeps its state when
-        # the grid is rebuilt on each deposit click.
-        dbc.Row(
+        # Each section is shown once the selection above it is made (see
+        # bp_show_sections). Hidden rather than removed, so the BDL switch
+        # keeps its state.
+        html.Div(
             [
-                dbc.Col(html.H5("Samples"), width="auto"),
-                dbc.Col(
-                    dbc.Switch(
-                        id="bp-include-bdl",
-                        label="Include below-detection readings",
-                        value=True,
-                    ),
-                    className="d-flex justify-content-end",
+                html.Br(),
+                html.H5("Papers"),
+                dbc.Row(
+                    dbc.Spinner(
+                        html.Div(id="bp-papers-results"),
+                        color="primary",
+                        type="border",
+                        size="lg",
+                    )
                 ),
             ],
-            align="center",
+            id="bp-papers-section",
+            style=HIDDEN,
         ),
-        dbc.Row(
-            dbc.Spinner(
-                html.Div(id="bp-samples-results"),
-                color="primary",
-                type="border",
-                size="lg",
-            )
+        html.Div(
+            [
+                html.Br(),
+                html.H5("Deposits"),
+                dbc.Row(
+                    dbc.Spinner(
+                        html.Div(id="bp-deposits-results"),
+                        color="primary",
+                        type="border",
+                        size="lg",
+                    )
+                ),
+            ],
+            id="bp-deposits-section",
+            style=HIDDEN,
+        ),
+        html.Div(
+            [
+                html.Br(),
+                html.H5(
+                    [
+                        "Grade Summary ",
+                        html.I(
+                            id="bp-summary-info",
+                            className="fas fa-info-circle text-muted",
+                            style={"fontSize": "0.8em", "cursor": "help"},
+                        ),
+                    ]
+                ),
+                dbc.Tooltip(
+                    "Grade summary is always calculated from readings above the "
+                    "detection limit.",
+                    target="bp-summary-info",
+                    placement="right",
+                ),
+                dbc.Row(
+                    dbc.Spinner(
+                        html.Div(id="bp-summary-results"),
+                        color="primary",
+                        type="border",
+                        size="lg",
+                    )
+                ),
+                html.Br(),
+                # The switch lives outside bp-samples-results so it keeps its state when
+                # the grid is rebuilt on each deposit click.
+                dbc.Row(
+                    [
+                        dbc.Col(html.H5("Samples"), width="auto"),
+                        dbc.Col(
+                            dbc.Switch(
+                                id="bp-include-bdl",
+                                label="Include below-detection readings",
+                                value=True,
+                            ),
+                            className="d-flex justify-content-end",
+                        ),
+                    ],
+                    align="center",
+                ),
+                dbc.Row(
+                    dbc.Spinner(
+                        html.Div(id="bp-samples-results"),
+                        color="primary",
+                        type="border",
+                        size="lg",
+                    )
+                ),
+            ],
+            id="bp-samples-section",
+            style=HIDDEN,
         ),
     ],
     style={"margin": "20px"},
@@ -337,6 +375,35 @@ def _build_group_summary(samples, commodity, deposit_name=None):
     return html.Div(children)
 
 
+def _shown(visible):
+    return {} if visible else HIDDEN
+
+
+@callback(
+    Output("bp-papers-section", "style"),
+    Output("bp-deposits-section", "style"),
+    Output("bp-samples-section", "style"),
+    Input("bp-commodity", "value"),
+    Input("bp-country", "value"),
+    Input("bp-selected-paper", "data"),
+    Input("bp-selected-deposit", "data"),
+)
+def bp_show_sections(commodity, country, paper, deposit):
+    # Each section appears once the selection above it is made. A change
+    # upstream hides everything below it at once: the stores keep their old
+    # values until the slower data callbacks clear them.
+    trigger = dash.ctx.triggered_id
+    if trigger in ("bp-commodity", "bp-country"):
+        paper = deposit = None
+    elif trigger == "bp-selected-paper":
+        deposit = None
+    return (
+        _shown(commodity),
+        _shown(commodity and paper),
+        _shown(commodity and paper and deposit),
+    )
+
+
 @callback(
     Output("bp-commodity", "options"),
     Output("bp-commodity-alert", "children"),
@@ -359,6 +426,7 @@ def bp_load_commodities(pathname):
     Output("bp-deposits-results", "children"),
     Output("bp-samples-results", "children"),
     Output("bp-summary-results", "children"),
+    Output("bp-selected-paper", "data", allow_duplicate=True),
     Output("bp-selected-deposit", "data", allow_duplicate=True),
     Input("bp-commodity", "value"),
     Input("bp-country", "value"),
@@ -374,7 +442,7 @@ def bp_update_papers(commodity, country):
         country_value = dash.no_update
 
     if not commodity:
-        return [], country_value, html.Div(), html.Div(), html.Div(), html.Div(), None
+        return [], country_value, html.Div(), html.Div(), html.Div(), html.Div(), None, None
 
     # One try around both calls -- either failing means the same thing to
     # the user.
@@ -383,14 +451,16 @@ def bp_update_papers(commodity, country):
         papers = api.get_papers(commodity, country)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem papers for %s", commodity)
-        return [], country_value, _error_alert(exc), html.Div(), html.Div(), html.Div(), None
+        return (
+            [], country_value, _error_alert(exc), html.Div(), html.Div(), html.Div(), None, None
+        )
 
     papers_grid = (
         _build_papers_grid(papers, _is_group(commodity)) if papers else _no_results_alert()
     )
 
     # A new commodity/country selection invalidates the old paper-level
-    # summary and deposit selection, same as Deposits and Samples.
+    # summary and the paper and deposit selections, same as Deposits and Samples.
     return (
         country_options,
         country_value,
@@ -398,6 +468,7 @@ def bp_update_papers(commodity, country):
         html.Div(),
         html.Div(),
         html.Div(),
+        None,
         None,
     )
 
@@ -407,17 +478,17 @@ def bp_update_papers(commodity, country):
     Output("bp-samples-results", "children", allow_duplicate=True),
     Output("bp-summary-results", "children", allow_duplicate=True),
     Output("bp-selected-deposit", "data", allow_duplicate=True),
-    Input("bp-papers-grid", "selectedRows"),
+    Input("bp-selected-paper", "data"),
     State("bp-commodity", "value"),
     prevent_initial_call=True,
 )
-def bp_update_deposits(selected_rows, commodity):
-    if not selected_rows or not commodity:
+def bp_update_deposits(paper, commodity):
+    if not paper or not commodity:
         return html.Div(), html.Div(), html.Div(), None
 
-    paper_id = selected_rows[0]["paper_id"]
+    paper_id = paper["paper_id"]
     try:
-        deposits = api.get_deposits(paper_id, selected_rows[0]["elements"])
+        deposits = api.get_deposits(paper_id, paper["elements"])
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem deposits for %s", paper_id)
         return _error_alert(exc), html.Div(), html.Div(), None
@@ -429,6 +500,15 @@ def bp_update_deposits(selected_rows, commodity):
     # The summary describes one deposit, and selecting a new paper leaves none
     # selected -- so it clears here and is filled by bp_update_samples.
     return deposits_grid, html.Div(), html.Div(), None
+
+
+@callback(
+    Output("bp-selected-paper", "data"),
+    Input("bp-papers-grid", "selectedRows"),
+    prevent_initial_call=True,
+)
+def bp_select_paper(selected_rows):
+    return selected_rows[0] if selected_rows else None
 
 
 @callback(
