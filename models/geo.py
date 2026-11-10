@@ -1,6 +1,6 @@
 import pandas as pd
 from helpers import dataservice_utils
-from constants import API_ENDPOINT
+from constants import API_ENDPOINT, FRONTEND_ENDPOINT
 import asyncio
 
 
@@ -50,7 +50,7 @@ class GeoMineral:
                 continue
 
             combined_data = {}
-            combined_data["ms"] = "/".join(["/derived", data["id"]])
+            combined_data["ms"] = "/".join([FRONTEND_ENDPOINT, "derived", data["id"]])
             combined_data["ms_name"] = data["name"]
             combined_data["ms_type"] = data["type"]
             combined_data["ms_rank"] = data["rank"]

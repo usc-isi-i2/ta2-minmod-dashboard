@@ -7,10 +7,11 @@ WORKDIR /usr/src/app
 # Copy only the necessary files to install dependencies first
 COPY pyproject.toml poetry.lock ./
 
-# Install Poetry
+# Install Poetry (pinned -- the installer defaults to the latest release,
+# which requires Python >=3.10 and fails to install under this image's 3.9)
 RUN apt-get update && \
     apt-get install -y curl && \
-    curl -sSL https://install.python-poetry.org | python3 - && \
+    curl -sSL https://install.python-poetry.org | POETRY_VERSION=1.8.3 python3 - && \
     # Make poetry available in the PATH
     ln -s /root/.local/bin/poetry /usr/local/bin/poetry && \
     # Install project dependencies

@@ -1,6 +1,7 @@
 version: "3.8"
 
 services:
+  # By-Product needs GEOCHEM_API_ENDPOINT (ISI VPN) reachable at runtime
   dashboard:
     build:
       context: .
@@ -11,5 +12,8 @@ services:
     environment: 
       - API_ENDPOINT=${API_ENDPOINT}
       - SPARQL_ENDPOINT=${SPARQL_ENDPOINT}
+      - FRONTEND_ENDPOINT=${FRONTEND_ENDPOINT:-}
+      - GEOCHEM_API_ENDPOINT=${GEOCHEM_API_ENDPOINT:-http://dev.minmod.isi.edu/api/v1}
+      - GEOCHEM_ELEMENTS_CSV_URL=${GEOCHEM_ELEMENTS_CSV_URL:-https://raw.githubusercontent.com/usc-isi-i2/ta2-minmod-kg/main/minmodkg/misc/elements.csv}
     command: "poetry run python app.py"
 

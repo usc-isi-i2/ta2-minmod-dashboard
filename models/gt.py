@@ -7,7 +7,7 @@ from helpers.exceptions import EmptyDedupDataFrame, EmtpyGTDataFrame
 from datetime import datetime, timedelta
 import asyncio
 from helpers.kpis import get_commodity_dict
-from constants import API_ENDPOINT
+from constants import API_ENDPOINT, FRONTEND_ENDPOINT
 
 # Define a constant date range (e.g., 30 days)
 CACHE_DURATION_DAYS = 3
@@ -148,7 +148,7 @@ class GradeTonnage:
             for data in raw_data:
 
                 combined_data = {}
-                combined_data["ms"] = "/".join(["/derived", data["id"]])
+                combined_data["ms"] = "/".join([FRONTEND_ENDPOINT, "derived", data["id"]])
                 combined_data["ms_name"] = data["name"]
                 combined_data["ms_type"] = data["type"]
                 combined_data["ms_rank"] = data["rank"]
