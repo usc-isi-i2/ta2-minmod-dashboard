@@ -26,8 +26,8 @@ FRONTEND_ENDPOINT = os.environ.get("FRONTEND_ENDPOINT", "").rstrip("/")
 # The GeoChem papers API is only served on dev (production returns 404 for /papers), so it
 # cannot share API_ENDPOINT.
 GEOCHEM_API_ENDPOINT = os.environ.get("GEOCHEM_API_ENDPOINT", "http://dev.minmod.isi.edu/api/v1")
-# The API's own element table; the By-Product commodity dropdown and the name <-> symbol
-# mapping are read from it so they always match how the API resolves `element`.
+# The API's own element table. The By-Product tab maps critical_minerals.yaml names to
+# symbols with it, so they always match how the API resolves `element`.
 GEOCHEM_ELEMENTS_CSV_URL = os.environ.get(
     "GEOCHEM_ELEMENTS_CSV_URL",
     "https://raw.githubusercontent.com/usc-isi-i2/ta2-minmod-kg/main/minmodkg/misc/elements.csv",

@@ -125,11 +125,20 @@ def _error_alert(exc):
     )
 
 
-def _build_papers_grid(papers):
+def _element_names(symbols):
+    return ", ".join(api.element_name(s) for s in symbols)
+
+
+def _is_group(commodity):
+    return len(api.expand(commodity)) > 1
+
+
+def _build_papers_grid(papers, grouped=False):
     rows = []
     for p in papers:
         row = dict(p)
         row["doi_link"] = f"[{p['doi']}](https://doi.org/{p['doi']})" if p.get("doi") else None
+        row["elements_text"] = _element_names(p["elements"])
         rows.append(row)
 
     column_defs = [
@@ -143,6 +152,9 @@ def _build_papers_grid(papers):
             "cellRendererParams": {"linkTarget": "_blank"},
         },
     ]
+    # A group (PGE, REE) matches each paper on some of its elements.
+    if grouped:
+        column_defs.append({"headerName": "Elements", "field": "elements_text"})
     return AgGrid(
         id="bp-papers-grid",
         style=GRID_STYLE,
@@ -161,7 +173,8 @@ def _build_papers_grid(papers):
     )
 
 
-def _build_deposits_grid(deposits):
+def _build_deposits_grid(deposits, grouped=False):
+    rows = [{**d, "elements_text": _element_names(d["elements"])} for d in deposits]
     column_defs = [
         {"headerName": "Deposit Name", "field": "deposit_name"},
         {"headerName": "Country", "field": "country"},
@@ -169,11 +182,13 @@ def _build_deposits_grid(deposits):
         {"headerName": "Deposit Type", "field": "deposit_type_text"},
         {"headerName": "Confidence", "field": "deposit_type_confidence"},
     ]
+    if grouped:
+        column_defs.append({"headerName": "Elements", "field": "elements_text"})
     return AgGrid(
         id="bp-deposits-grid",
         style=GRID_STYLE,
         columnDefs=column_defs,
-        rowData=deposits,
+        rowData=rows,
         columnSize="responsiveSizeToFit",
         defaultColDef=DEFAULT_COL_DEF,
         dashGridOptions={
@@ -187,7 +202,7 @@ def _build_deposits_grid(deposits):
     )
 
 
-def _build_samples_grid(samples):
+def _build_samples_grid(samples, grouped=False):
     # The unit comes from each reading's grade_unit. When the deposit's
     # readings share one unit it goes in the header, as "Grade (ppm)";
     # otherwise each row shows its own unit in a Unit column.
@@ -199,11 +214,14 @@ def _build_samples_grid(samples):
     if has_units and not unit:
         grade_columns.append({"headerName": "Unit", "field": "grade_unit"})
 
+    rows = [{**s, "element_name": api.element_name(s["element"])} for s in samples]
+    element_columns = [{"headerName": "Element", "field": "element_name"}] if grouped else []
     column_defs = [
         {"headerName": "Sample ID", "field": "sample_id"},
         {"headerName": "Sample Name", "field": "sample_name"},
         {"headerName": "Sample Mineral", "field": "mineral"},
         {"headerName": "Analysis ID", "field": "analysis_id"},
+        *element_columns,
         *grade_columns,
         {"headerName": "Method", "field": "analytical_method"},
     ]
@@ -211,7 +229,7 @@ def _build_samples_grid(samples):
         id="bp-samples-grid",
         style=GRID_STYLE,
         columnDefs=column_defs,
-        rowData=samples,
+        rowData=rows,
         columnSize="responsiveSizeToFit",
         defaultColDef=DEFAULT_COL_DEF,
         dashGridOptions={
@@ -225,7 +243,7 @@ def _build_samples_grid(samples):
 
 
 def _build_grade_summary(stats, deposit_name=None, mixed_units=None):
-    commodity = api.element_name(stats["commodity"])
+    commodity = api.commodity_label(stats["commodity"])
     # A site's name is optional in the API, so it can be missing.
     heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
 
@@ -266,6 +284,57 @@ def _build_grade_summary(stats, deposit_name=None, mixed_units=None):
             ),
         ]
     )
+
+
+def _build_group_summary(samples, commodity, deposit_name=None):
+    """One summary row per element: min/avg across different elements
+    (Pd and Pt, say) would be meaningless."""
+    heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
+
+    def fmt(value):
+        return "—" if value is None else round(value, 3)
+
+    body = []
+    mixed = []
+    for element in api.expand(commodity):
+        element_samples = [s for s in samples if s["element"] == element]
+        if not element_samples:
+            continue
+        units = {s.get("grade_unit") for s in api.detected_only(element_samples)}
+        name = api.commodity_label(element)
+        if len(units) > 1:
+            mixed.append(f"{name}: {', '.join(sorted(u or 'unknown' for u in units))}")
+            continue
+        stats = api.summarize_grades(element_samples, element)
+        body.append(
+            html.Tr(
+                [html.Td(name), html.Td(stats["count"])]
+                + [html.Td(fmt(stats[k])) for k in ("min", "max", "avg", "median")]
+            )
+        )
+
+    header = html.Thead(
+        html.Tr([html.Th(h) for h in ("Element", "Count", "Min", "Max", "Avg", "Median")])
+    )
+    children = [html.H5(heading)]
+    if not body and not mixed:
+        children.append(
+            dbc.Alert(
+                f"No numeric grade data available for {commodity} at this deposit.",
+                color="danger",
+            )
+        )
+    if body:
+        children.append(dbc.Table([header, html.Tbody(body)], bordered=True, size="sm"))
+    if mixed:
+        children.append(
+            dbc.Alert(
+                "Grade units differ at this deposit, so no summary for "
+                + "; ".join(mixed) + ".",
+                color="warning",
+            )
+        )
+    return html.Div(children)
 
 
 @callback(
@@ -316,7 +385,9 @@ def bp_update_papers(commodity, country):
         logger.exception("Could not load GeoChem papers for %s", commodity)
         return [], country_value, _error_alert(exc), html.Div(), html.Div(), html.Div(), None
 
-    papers_grid = _build_papers_grid(papers) if papers else _no_results_alert()
+    papers_grid = (
+        _build_papers_grid(papers, _is_group(commodity)) if papers else _no_results_alert()
+    )
 
     # A new commodity/country selection invalidates the old paper-level
     # summary and deposit selection, same as Deposits and Samples.
@@ -346,12 +417,14 @@ def bp_update_deposits(selected_rows, commodity):
 
     paper_id = selected_rows[0]["paper_id"]
     try:
-        deposits = api.get_deposits(paper_id, commodity)
+        deposits = api.get_deposits(paper_id, selected_rows[0]["elements"])
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem deposits for %s", paper_id)
         return _error_alert(exc), html.Div(), html.Div(), None
 
-    deposits_grid = _build_deposits_grid(deposits) if deposits else _no_results_alert()
+    deposits_grid = (
+        _build_deposits_grid(deposits, _is_group(commodity)) if deposits else _no_results_alert()
+    )
 
     # The summary describes one deposit, and selecting a new paper leaves none
     # selected -- so it clears here and is filled by bp_update_samples.
@@ -383,7 +456,7 @@ def bp_update_samples(deposit, include_bdl, commodity):
     site_id = deposit["site_id"]
     deposit_name = deposit.get("deposit_name")
     try:
-        samples = api.get_samples(paper_id, site_id, commodity)
+        samples = api.get_samples(paper_id, site_id, tuple(deposit["elements"]))
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem samples for %s", site_id)
         return _error_alert(exc), html.Div()
@@ -393,9 +466,12 @@ def bp_update_samples(deposit, include_bdl, commodity):
     if not include_bdl:
         samples = api.detected_only(samples)
 
-    samples_grid = _build_samples_grid(samples) if samples else _no_results_alert()
+    grouped = _is_group(commodity)
+    samples_grid = _build_samples_grid(samples, grouped) if samples else _no_results_alert()
     # Derived from the rows just fetched, so the summary cannot disagree with
     # the grid below it.
+    if grouped:
+        return samples_grid, _build_group_summary(samples, commodity, deposit_name)
     detected_units = {s.get("grade_unit") for s in api.detected_only(samples)}
     summary = _build_grade_summary(
         api.summarize_grades(samples, commodity),

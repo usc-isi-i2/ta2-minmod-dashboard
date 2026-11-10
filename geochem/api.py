@@ -10,9 +10,12 @@ matches what the samples actually measured, which is what a by-product is.
 Every element call passes include_bdl=true, so readings below the detection
 limit (stored as negative grades) count as occurrences too.
 
-The element list and the name <-> symbol mapping come from the API's own
-elements.csv in ta2-minmod-kg, read at runtime rather than copied, so the
-dropdown always resolves the same way the API does.
+The commodity dropdown lists the critical minerals from critical_minerals.yaml
+(adjusted below), plus the PGE and REE groups. The API filters on one element
+at a time, so a group fans out into one request per element and the results
+are merged here. Names are mapped to symbols with the API's own elements.csv
+in ta2-minmod-kg, read at runtime rather than copied, so the dropdown always
+resolves the same way the API does.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from constants import GEOCHEM_API_ENDPOINT, GEOCHEM_ELEMENTS_CSV_URL
+from constants import GEOCHEM_API_ENDPOINT, GEOCHEM_ELEMENTS_CSV_URL, config
 from logger_config import logger
 
 # List and detail calls answer in well under a second; samples for the
@@ -237,18 +240,84 @@ def element_name(symbol: str) -> str:
     return symbol
 
 
-def get_commodities() -> list[dict]:
-    """Dropdown options for every element, labelled by name, valued by symbol.
+# critical_minerals.yaml is shared with the other tabs, so the By-Product
+# adjustments live here rather than in the file.
+_CRITICAL_REMOVE = {"fluorspar", "graphite", "platinum"}
+_CRITICAL_ADD = ["Carbon"]
+_GROUP_ADD = {"PGE": ["Platinum", "Osmium"], "REE": ["Promethium"]}
+# YAML entries that are minerals, not elements.
+_MINERAL_TO_ELEMENT = {"barite": "Barium"}
 
-    `search` lets the dropdown match the symbol as well as the name.
+GROUP_LABELS = {
+    "PGE": "PGE (all platinum-group elements)",
+    "REE": "REE (all rare-earth elements)",
+}
+
+
+def _symbols(names) -> list[str]:
+    """Element names -> symbols, in order and de-duplicated.
+
+    A name the element table can't resolve is logged and skipped, so a new
+    YAML entry can't break the page.
     """
-    return sorted(
+    symbols = []
+    for name in names:
+        symbol = element_symbol(_MINERAL_TO_ELEMENT.get(name.strip().lower(), name))
+        if symbol is None:
+            logger.warning("No element symbol for %r in critical_minerals.yaml", name)
+        elif symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def element_groups() -> dict[str, list[str]]:
+    """{'PGE': [...], 'REE': [...]} as element symbols."""
+    return {
+        group: _symbols([*config[group], *extra]) for group, extra in _GROUP_ADD.items()
+    }
+
+
+def expand(commodity: str) -> tuple[str, ...]:
+    """The element symbols a dropdown value stands for: a group's members, or itself."""
+    return tuple(element_groups().get(commodity, [commodity]))
+
+
+def commodity_label(value: str) -> str:
+    """'PGE' -> 'PGE', 'Ga' -> 'Gallium (Ga)'."""
+    if value in GROUP_LABELS:
+        return value
+    return f"{element_name(value)} ({value})"
+
+
+def get_commodities() -> list[dict]:
+    """Dropdown options: the PGE and REE groups, then every element.
+
+    Elements are labelled 'Gallium (Ga)' and valued by symbol; `search` lets
+    the dropdown match the symbol as well as the name.
+    """
+    critical = [
+        name for name in config["CRITICAL_MINERALS"] if name.lower() not in _CRITICAL_REMOVE
+    ]
+    groups = element_groups()
+    symbols = set(_symbols([*critical, *_CRITICAL_ADD]))
+    for members in groups.values():
+        symbols.update(members)
+
+    elements = sorted(
         (
-            {"label": row["name"], "value": row["symbol"], "search": f"{row['name']} {row['symbol']}"}
-            for row in _elements()[0]
+            {
+                "label": commodity_label(symbol),
+                "value": symbol,
+                "search": f"{element_name(symbol)} {symbol}",
+            }
+            for symbol in symbols
         ),
         key=lambda o: o["label"],
     )
+    return [
+        {"label": GROUP_LABELS[group], "value": group, "search": GROUP_LABELS[group]}
+        for group in groups
+    ] + elements
 
 
 # --------------------------------------------------------------------------
@@ -285,16 +354,17 @@ def _paper_detail(paper_id: str, element: str) -> dict:
 
 
 @_ttl_cache(ttl_seconds=900)
-def get_countries(element: str) -> list[dict]:
-    """Dropdown options for the countries of sites that measured `element`.
+def get_countries(commodity: str) -> list[dict]:
+    """Dropdown options for the countries of sites that measured `commodity`.
 
-    The API has no per-element country list, so this reads the sites of every
-    matching paper, in parallel. Values are MinMod ids, which the papers
-    search accepts as-is; labels are full names.
+    `commodity` is an element symbol or a group (PGE, REE). The API has no
+    per-element country list, so this reads the sites of every matching
+    paper, in parallel. Values are MinMod ids, which the papers search
+    accepts as-is; labels are full names.
     """
-    paper_ids = [p["paper_id"] for p in get_papers(element)]
+    pairs = [(p["paper_id"], e) for p in get_papers(commodity) for e in p["elements"]]
     with ThreadPoolExecutor(DETAIL_WORKERS) as ex:
-        details = list(ex.map(lambda pid: _paper_detail(pid, element), paper_ids))
+        details = list(ex.map(lambda pair: _paper_detail(*pair), pairs))
 
     names = get_country_names()
     countries = {}
@@ -315,8 +385,12 @@ def get_countries(element: str) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def get_papers(element: str, country: str | None = None) -> list[dict]:
-    """Papers with a reading of `element` (detected or below detection limit).
+def get_papers(commodity: str, country: str | None = None) -> list[dict]:
+    """Papers with a reading of `commodity` (detected or below detection limit).
+
+    `commodity` is an element symbol or a group (PGE, REE). The API filters on
+    one element at a time, so a group is one request per element, merged by
+    paper. Each paper lists the `elements` it matched.
 
     With `country`, the API requires one site to both be in that country and
     have measured the element.
@@ -324,11 +398,32 @@ def get_papers(element: str, country: str | None = None) -> list[dict]:
     Not cached: the key space is (element x country) and each value grows
     with the store.
     """
+    elements = expand(commodity)
+    if len(elements) == 1:
+        results = [_element_papers(elements[0], country)]
+    else:
+        with ThreadPoolExecutor(DETAIL_WORKERS) as ex:
+            results = list(ex.map(lambda e: _element_papers(e, country), elements))
+
+    papers = {}
+    for element, element_papers in zip(elements, results):
+        for p in element_papers:
+            papers.setdefault(p["paper_id"], {**p, "elements": []})["elements"].append(element)
+
+    papers = list(papers.values())
+    papers.sort(
+        key=lambda p: (p["year"] is None, -(p["year"] or 0), _nulls_last(p["title"]))
+    )
+    return papers
+
+
+def _element_papers(element: str, country: str | None) -> list[dict]:
+    """/papers for one element, reduced to the fields the grid shows."""
     params = {"element": element, "include_bdl": "true", "limit": 0}
     if country:
         params["country"] = country
 
-    papers = [
+    return [
         {
             "paper_id": p["paper_id"],
             "title": p.get("title"),
@@ -338,16 +433,20 @@ def get_papers(element: str, country: str | None = None) -> list[dict]:
         }
         for p in _get("/papers", params)
     ]
-    papers.sort(
-        key=lambda p: (p["year"] is None, -(p["year"] or 0), _nulls_last(p["title"]))
-    )
-    return papers
 
 
-def get_deposits(paper_id: str, element: str) -> list[dict]:
-    """Deposit sites in `paper_id` that measured `element`."""
+def get_deposits(paper_id: str, elements: list[str]) -> list[dict]:
+    """Deposit sites in `paper_id` that measured any of `elements`.
+
+    Each deposit lists the `elements` it measured.
+    """
+    sites = {}
+    for element in elements:
+        for site in _paper_detail(paper_id, element).get("sites", []):
+            sites.setdefault(site["id"], (site, []))[1].append(element)
+
     deposits = []
-    for site in _paper_detail(paper_id, element).get("sites", []):
+    for site, site_elements in sites.values():
         location = site.get("location_info") or {}
         countries = location.get("country") or []
         states = location.get("state_or_province") or []
@@ -367,6 +466,7 @@ def get_deposits(paper_id: str, element: str) -> list[dict]:
                 "state": states[0].get("observed_name") if states else None,
                 "deposit_type_text": best_type.get("observed_name"),
                 "deposit_type_confidence": to_float(best_type.get("confidence")),
+                "elements": site_elements,
             }
         )
     deposits.sort(key=lambda d: _nulls_last(d["deposit_name"]))
@@ -374,8 +474,8 @@ def get_deposits(paper_id: str, element: str) -> list[dict]:
 
 
 @_ttl_cache(ttl_seconds=900)
-def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
-    """Every graded reading of `element` on the samples of `site_id`.
+def get_samples(paper_id: str, site_id: str, elements: tuple[str, ...]) -> list[dict]:
+    """Every graded reading of `elements` on the samples of `site_id`.
 
     Fetches *all* the site's samples, with no element or include_bdl filter:
     grade filtering is done here, not by the API. The API's element filter
@@ -387,8 +487,8 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
     -0.4) and zero grades. Blank grades (no value) are always dropped.
 
     The API returns whole samples (every element they measured), so this
-    flattens sample -> analyses -> elements and keeps the selected element's
-    readings. One row per reading, NOT aggregated: repeated spot analyses on
+    flattens sample -> analyses -> elements and keeps the selected elements'
+    readings, each row naming its `element`. One row per reading, NOT aggregated: repeated spot analyses on
     one sample (e.g. 146 Ga spots) are real LA-ICP-MS data.
 
     Cached so that flipping the BDL switch only re-filters rows already held;
@@ -408,7 +508,10 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
             if analysis.get("is_deleted"):
                 continue
             for ei, reading in enumerate(analysis.get("elements") or []):
-                if reading.get("is_deleted") or element_symbol(reading.get("label")) != element:
+                if reading.get("is_deleted"):
+                    continue
+                symbol = element_symbol(reading.get("label"))
+                if symbol not in elements:
                     continue
                 grade = to_float(reading.get("grade"))
                 if grade is None:
@@ -423,6 +526,7 @@ def get_samples(paper_id: str, site_id: str, element: str) -> list[dict]:
                         "sample_name": sample.get("sample_name"),
                         "mineral": sample.get("mineral"),
                         "analysis_id": analysis.get("analysis_id"),
+                        "element": symbol,
                         "grade": grade,
                         "grade_unit": (reading.get("grade_unit") or {}).get("observed_name"),
                         "analytical_method": analysis.get("analytical_method"),
