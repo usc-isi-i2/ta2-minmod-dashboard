@@ -18,10 +18,7 @@ HIDDEN = {"display": "none"}
 layout = html.Div(
     [
         dcc.Location(id="url-byproduct", refresh=True),
-        # The selected paper and deposit, kept outside their grids: a grid only
-        # exists once the step above it is picked, and a callback whose Input
-        # is missing from the layout errors in the browser when one of its
-        # other Inputs (the BDL switch, the commodity) fires.
+        # selections live in stores because the grids are not always in the layout
         dcc.Store(id="bp-selected-paper"),
         dcc.Store(id="bp-selected-deposit"),
         dbc.Row(
@@ -52,12 +49,9 @@ layout = html.Div(
                 ),
             ]
         ),
-        # Shown when the commodity list itself can't be loaded, so an empty
-        # dropdown doesn't read as "no data".
+        # error when the commodity list can't load
         html.Div(id="bp-commodity-alert", className="mt-2"),
-        # Each section is shown once the selection above it is made (see
-        # bp_show_sections). Hidden rather than removed, so the BDL switch
-        # keeps its state.
+        # sections are hidden, not removed, so the BDL switch keeps its state
         html.Div(
             [
                 html.Br(),
@@ -118,8 +112,7 @@ layout = html.Div(
                     )
                 ),
                 html.Br(),
-                # The switch lives outside bp-samples-results so it keeps its state when
-                # the grid is rebuilt on each deposit click.
+                # outside the results div so it survives grid rebuilds
                 dbc.Row(
                     [
                         dbc.Col(html.H5("Samples"), width="auto"),
@@ -151,32 +144,31 @@ layout = html.Div(
 )
 
 
-def _no_results_alert():
+def no_results_alert():
     return dbc.Alert("No results found.", color="danger")
 
 
-def _error_alert(exc):
-    """Distinct from _no_results_alert: "the query could not run" must not
-    read as "this commodity has no data"."""
+def error_alert(exc):
+    """Query failed, as opposed to no results."""
     return dbc.Alert(
         [html.Strong("GeoChem data unavailable. "), str(exc)], color="danger"
     )
 
 
-def _element_names(symbols):
+def element_names(symbols):
     return ", ".join(api.element_name(s) for s in symbols)
 
 
-def _is_group(commodity):
+def is_group(commodity):
     return len(api.expand(commodity)) > 1
 
 
-def _build_papers_grid(papers, grouped=False):
+def build_papers_grid(papers, grouped=False):
     rows = []
     for p in papers:
         row = dict(p)
         row["doi_link"] = f"[{p['doi']}](https://doi.org/{p['doi']})" if p.get("doi") else None
-        row["elements_text"] = _element_names(p["elements"])
+        row["elements_text"] = element_names(p["elements"])
         rows.append(row)
 
     column_defs = [
@@ -190,7 +182,7 @@ def _build_papers_grid(papers, grouped=False):
             "cellRendererParams": {"linkTarget": "_blank"},
         },
     ]
-    # A group (PGE, REE) matches each paper on some of its elements.
+    # a group matches each paper on some of its elements
     if grouped:
         column_defs.append({"headerName": "Elements", "field": "elements_text"})
     return AgGrid(
@@ -211,8 +203,8 @@ def _build_papers_grid(papers, grouped=False):
     )
 
 
-def _build_deposits_grid(deposits, grouped=False):
-    rows = [{**d, "elements_text": _element_names(d["elements"])} for d in deposits]
+def build_deposits_grid(deposits, grouped=False):
+    rows = [{**d, "elements_text": element_names(d["elements"])} for d in deposits]
     column_defs = [
         {"headerName": "Deposit Name", "field": "deposit_name"},
         {"headerName": "Country", "field": "country"},
@@ -240,10 +232,8 @@ def _build_deposits_grid(deposits, grouped=False):
     )
 
 
-def _build_samples_grid(samples, grouped=False):
-    # The unit comes from each reading's grade_unit. When the deposit's
-    # readings share one unit it goes in the header, as "Grade (ppm)";
-    # otherwise each row shows its own unit in a Unit column.
+def build_samples_grid(samples, grouped=False):
+    # a shared unit goes in the header, otherwise a Unit column
     unit = api.common_unit(samples)
     has_units = any(s.get("grade_unit") for s in samples)
     grade_columns = [
@@ -280,12 +270,10 @@ def _build_samples_grid(samples, grouped=False):
     )
 
 
-def _build_grade_summary(stats, deposit_name=None, mixed_units=None):
+def build_grade_summary(stats, deposit_name=None, mixed_units=None):
     commodity = api.commodity_label(stats["commodity"])
-    # A site's name is optional in the API, so it can be missing.
     heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
 
-    # Min/avg across different units would be meaningless.
     if mixed_units:
         units = ", ".join(sorted(u or "unknown" for u in mixed_units))
         return html.Div(
@@ -324,9 +312,8 @@ def _build_grade_summary(stats, deposit_name=None, mixed_units=None):
     )
 
 
-def _build_group_summary(samples, commodity, deposit_name=None):
-    """One summary row per element: min/avg across different elements
-    (Pd and Pt, say) would be meaningless."""
+def build_group_summary(samples, commodity, deposit_name=None):
+    """One summary row per element of the group."""
     heading = f"{commodity} — {deposit_name}" if deposit_name else commodity
 
     def fmt(value):
@@ -375,7 +362,7 @@ def _build_group_summary(samples, commodity, deposit_name=None):
     return html.Div(children)
 
 
-def _shown(visible):
+def section_style(visible):
     return {} if visible else HIDDEN
 
 
@@ -389,18 +376,17 @@ def _shown(visible):
     Input("bp-selected-deposit", "data"),
 )
 def bp_show_sections(commodity, country, paper, deposit):
-    # Each section appears once the selection above it is made. A change
-    # upstream hides everything below it at once: the stores keep their old
-    # values until the slower data callbacks clear them.
+    # hide sections below a changed selection right away; the data
+    # callbacks clear the stores later
     trigger = dash.ctx.triggered_id
     if trigger in ("bp-commodity", "bp-country"):
         paper = deposit = None
     elif trigger == "bp-selected-paper":
         deposit = None
     return (
-        _shown(commodity),
-        _shown(commodity and paper),
-        _shown(commodity and paper and deposit),
+        section_style(commodity),
+        section_style(commodity and paper),
+        section_style(commodity and paper and deposit),
     )
 
 
@@ -410,13 +396,12 @@ def bp_show_sections(commodity, country, paper, deposit):
     Input("url-byproduct", "pathname"),
 )
 def bp_load_commodities(pathname):
-    # Must degrade rather than raise: if this throws, the page renders
-    # nothing at all, not even the layout.
+    # must not raise, or the whole page fails to render
     try:
         return api.get_commodities(), None
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem commodities")
-        return [], _error_alert(exc)
+        return [], error_alert(exc)
 
 
 @callback(
@@ -433,44 +418,40 @@ def bp_load_commodities(pathname):
     prevent_initial_call=True,
 )
 def bp_update_papers(commodity, country):
-    # A new commodity starts unfiltered: the previous country is cleared
-    # rather than carried into the first papers request.
-    if dash.ctx.triggered_id == "bp-commodity":
+    # a new commodity starts unfiltered and rebuilds the country list
+    new_commodity = dash.ctx.triggered_id == "bp-commodity"
+    if new_commodity:
         country = None
-        country_value = None
-    else:
-        country_value = dash.no_update
+    country_value = None if new_commodity else dash.no_update
+    empty = (html.Div(), html.Div(), html.Div(), None, None)
 
     if not commodity:
-        return [], country_value, html.Div(), html.Div(), html.Div(), html.Div(), None, None
+        return [], country_value, html.Div(), *empty
 
-    # One try around both calls -- either failing means the same thing to
-    # the user.
     try:
-        country_options = api.get_countries(commodity)
         papers = api.get_papers(commodity, country)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem papers for %s", commodity)
-        return (
-            [], country_value, _error_alert(exc), html.Div(), html.Div(), html.Div(), None, None
-        )
+        options = [] if new_commodity else dash.no_update
+        return options, country_value, error_alert(exc), *empty
 
-    papers_grid = (
-        _build_papers_grid(papers, _is_group(commodity)) if papers else _no_results_alert()
+    # the country list depends only on the commodity, so it is built from the
+    # unfiltered papers; failing it must not hide the papers
+    children = []
+    country_options = dash.no_update
+    if new_commodity:
+        try:
+            country_options = api.get_countries(papers)
+        except api.GeochemAPIError as exc:
+            logger.exception("Could not load GeoChem countries for %s", commodity)
+            country_options = []
+            children.append(
+                dbc.Alert([html.Strong("Country filter unavailable. "), str(exc)], color="warning")
+            )
+    children.append(
+        build_papers_grid(papers, is_group(commodity)) if papers else no_results_alert()
     )
-
-    # A new commodity/country selection invalidates the old paper-level
-    # summary and the paper and deposit selections, same as Deposits and Samples.
-    return (
-        country_options,
-        country_value,
-        papers_grid,
-        html.Div(),
-        html.Div(),
-        html.Div(),
-        None,
-        None,
-    )
+    return country_options, country_value, html.Div(children), *empty
 
 
 @callback(
@@ -491,14 +472,13 @@ def bp_update_deposits(paper, commodity):
         deposits = api.get_deposits(paper_id, paper["elements"])
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem deposits for %s", paper_id)
-        return _error_alert(exc), html.Div(), html.Div(), None
+        return error_alert(exc), html.Div(), html.Div(), None
 
     deposits_grid = (
-        _build_deposits_grid(deposits, _is_group(commodity)) if deposits else _no_results_alert()
+        build_deposits_grid(deposits, is_group(commodity)) if deposits else no_results_alert()
     )
 
-    # The summary describes one deposit, and selecting a new paper leaves none
-    # selected -- so it clears here and is filled by bp_update_samples.
+    # no deposit is selected yet, so the summary is cleared
     return deposits_grid, html.Div(), html.Div(), None
 
 
@@ -539,21 +519,18 @@ def bp_update_samples(deposit, include_bdl, commodity):
         samples = api.get_samples(paper_id, site_id, tuple(deposit["elements"]))
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem samples for %s", site_id)
-        return _error_alert(exc), html.Div()
+        return error_alert(exc), html.Div()
 
-    # Switch on: positive, below-detection (negative) and zero grades.
-    # Switch off: detected (positive) grades only. Blanks never reach here.
+    # off: detected (positive) grades only
     if not include_bdl:
         samples = api.detected_only(samples)
 
-    grouped = _is_group(commodity)
-    samples_grid = _build_samples_grid(samples, grouped) if samples else _no_results_alert()
-    # Derived from the rows just fetched, so the summary cannot disagree with
-    # the grid below it.
+    grouped = is_group(commodity)
+    samples_grid = build_samples_grid(samples, grouped) if samples else no_results_alert()
     if grouped:
-        return samples_grid, _build_group_summary(samples, commodity, deposit_name)
+        return samples_grid, build_group_summary(samples, commodity, deposit_name)
     detected_units = {s.get("grade_unit") for s in api.detected_only(samples)}
-    summary = _build_grade_summary(
+    summary = build_grade_summary(
         api.summarize_grades(samples, commodity),
         deposit_name,
         mixed_units=detected_units if len(detected_units) > 1 else None,

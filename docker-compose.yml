@@ -1,10 +1,7 @@
 version: "3.8"
 
 services:
-  # The By-Product tab calls the GeoChem API live, so the host must be able
-  # to reach GEOCHEM_API_ENDPOINT (ISI VPN) while the dashboard is running --
-  # not just at build time. It also reads the element list from
-  # GEOCHEM_ELEMENTS_CSV_URL (GitHub).
+  # By-Product needs GEOCHEM_API_ENDPOINT (ISI VPN) reachable at runtime
   dashboard:
     build:
       context: .
