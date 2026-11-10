@@ -38,6 +38,18 @@ layout = html.Div(
                 ),
                 dbc.Col(
                     [
+                        dbc.Label("Deposit Type"),
+                        dcc.Dropdown(
+                            id="bp-deposit-type",
+                            options=[],
+                            multi=True,
+                            placeholder="Search Deposit Type",
+                        ),
+                    ],
+                    width=4,
+                ),
+                dbc.Col(
+                    [
                         dbc.Label("Country"),
                         dcc.Dropdown(
                             id="bp-country",
@@ -209,8 +221,9 @@ def build_deposits_grid(deposits, grouped=False):
         {"headerName": "Deposit Name", "field": "deposit_name"},
         {"headerName": "Country", "field": "country"},
         {"headerName": "State", "field": "state"},
-        {"headerName": "Deposit Type", "field": "deposit_type_text"},
+        {"headerName": "Deposit Type", "field": "deposit_type"},
         {"headerName": "Confidence", "field": "deposit_type_confidence"},
+        {"headerName": "Reported Deposit Type", "field": "reported_deposit_type"},
     ]
     if grouped:
         column_defs.append({"headerName": "Elements", "field": "elements_text"})
@@ -371,15 +384,16 @@ def section_style(visible):
     Output("bp-deposits-section", "style"),
     Output("bp-samples-section", "style"),
     Input("bp-commodity", "value"),
+    Input("bp-deposit-type", "value"),
     Input("bp-country", "value"),
     Input("bp-selected-paper", "data"),
     Input("bp-selected-deposit", "data"),
 )
-def bp_show_sections(commodity, country, paper, deposit):
+def bp_show_sections(commodity, deposit_types, country, paper, deposit):
     # hide sections below a changed selection right away; the data
     # callbacks clear the stores later
     trigger = dash.ctx.triggered_id
-    if trigger in ("bp-commodity", "bp-country"):
+    if trigger in ("bp-commodity", "bp-deposit-type", "bp-country"):
         paper = deposit = None
     elif trigger == "bp-selected-paper":
         deposit = None
@@ -405,6 +419,8 @@ def bp_load_commodities(pathname):
 
 
 @callback(
+    Output("bp-deposit-type", "options"),
+    Output("bp-deposit-type", "value"),
     Output("bp-country", "options"),
     Output("bp-country", "value"),
     Output("bp-papers-results", "children"),
@@ -414,44 +430,56 @@ def bp_load_commodities(pathname):
     Output("bp-selected-paper", "data", allow_duplicate=True),
     Output("bp-selected-deposit", "data", allow_duplicate=True),
     Input("bp-commodity", "value"),
+    Input("bp-deposit-type", "value"),
     Input("bp-country", "value"),
     prevent_initial_call=True,
 )
-def bp_update_papers(commodity, country):
-    # a new commodity starts unfiltered and rebuilds the country list
-    new_commodity = dash.ctx.triggered_id == "bp-commodity"
+def bp_update_papers(commodity, deposit_types, country):
+    # a new commodity starts unfiltered and rebuilds both filter lists;
+    # a deposit type change narrows the country list, like the Mineral Site tab
+    trigger = dash.ctx.triggered_id
+    new_commodity = trigger == "bp-commodity"
     if new_commodity:
-        country = None
-    country_value = None if new_commodity else dash.no_update
+        deposit_types, country = None, None
+    deposit_types = tuple(deposit_types or ())
+    reset = None if new_commodity else dash.no_update
     empty = (html.Div(), html.Div(), html.Div(), None, None)
 
     if not commodity:
-        return [], country_value, html.Div(), *empty
+        return [], reset, [], reset, html.Div(), *empty
 
     try:
-        papers = api.get_papers(commodity, country)
+        papers = api.get_papers(commodity, country, deposit_types)
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem papers for %s", commodity)
         options = [] if new_commodity else dash.no_update
-        return options, country_value, error_alert(exc), *empty
+        return options, reset, options, reset, error_alert(exc), *empty
 
-    # the country list depends only on the commodity, so it is built from the
-    # unfiltered papers; failing it must not hide the papers
+    # options come from the commodity's unfiltered papers; failing them must
+    # not hide the papers
     children = []
-    country_options = dash.no_update
-    if new_commodity:
+    type_options = country_options = dash.no_update
+    if trigger in ("bp-commodity", "bp-deposit-type"):
         try:
-            country_options = api.get_countries(papers)
+            all_papers = papers if new_commodity else api.get_papers(commodity)
+            types, countries = api.get_filter_options(all_papers, deposit_types)
+            country_options = countries
+            if new_commodity:
+                type_options = types
         except api.GeochemAPIError as exc:
-            logger.exception("Could not load GeoChem countries for %s", commodity)
+            logger.exception("Could not load GeoChem filters for %s", commodity)
             country_options = []
+            if new_commodity:
+                type_options = []
             children.append(
-                dbc.Alert([html.Strong("Country filter unavailable. "), str(exc)], color="warning")
+                dbc.Alert([html.Strong("Filters unavailable. "), str(exc)], color="warning")
             )
     children.append(
         build_papers_grid(papers, is_group(commodity)) if papers else no_results_alert()
     )
-    return country_options, country_value, html.Div(children), *empty
+    return (
+        type_options, reset, country_options, reset, html.Div(children), *empty
+    )
 
 
 @callback(
@@ -461,15 +489,16 @@ def bp_update_papers(commodity, country):
     Output("bp-selected-deposit", "data", allow_duplicate=True),
     Input("bp-selected-paper", "data"),
     State("bp-commodity", "value"),
+    State("bp-deposit-type", "value"),
     prevent_initial_call=True,
 )
-def bp_update_deposits(paper, commodity):
+def bp_update_deposits(paper, commodity, deposit_types):
     if not paper or not commodity:
         return html.Div(), html.Div(), html.Div(), None
 
     paper_id = paper["paper_id"]
     try:
-        deposits = api.get_deposits(paper_id, paper["elements"])
+        deposits = api.get_deposits(paper_id, paper["elements"], tuple(deposit_types or ()))
     except api.GeochemAPIError as exc:
         logger.exception("Could not load GeoChem deposits for %s", paper_id)
         return error_alert(exc), html.Div(), html.Div(), None

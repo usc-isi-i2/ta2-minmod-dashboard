@@ -267,7 +267,7 @@ def get_commodities() -> list[dict]:
 
 
 # --------------------------------------------------------------------------
-# Countries
+# Filters
 # --------------------------------------------------------------------------
 
 
@@ -275,6 +275,12 @@ def get_commodities() -> list[dict]:
 def get_country_names() -> dict[str, str]:
     """MinMod country id -> display name ('Q1044' -> 'China')."""
     return {uri_qid(c["uri"]): c["name"] for c in get_json("/countries")}
+
+
+@ttl_cache(ttl_seconds=3600)
+def get_deposit_type_names() -> dict[str, str]:
+    """MinMod deposit type id -> display name."""
+    return {uri_qid(d["uri"]): d["name"] for d in get_json("/deposit-types")}
 
 
 def country_name(candidate: dict) -> str | None:
@@ -291,27 +297,60 @@ def paper_detail(paper_id: str, element: str) -> dict:
     )
 
 
-def get_countries(papers: list[dict]) -> list[dict]:
-    """Dropdown options for the countries of the sites in `papers` (from get_papers).
+@ttl_cache(ttl_seconds=900)
+def dedup_deposit_type(dedup_site_id: str) -> dict:
+    """The dedup site's top deposit type ({id, confidence}), or {} if it has none.
 
+    This is the type the papers search filters on.
+    """
+    types = get_json(f"/dedup-mineral-sites/{dedup_site_id}").get("deposit_types") or []
+    return types[0] if types else {}
+
+
+def site_deposit_types(sites: list[dict]) -> list[dict]:
+    """dedup_deposit_type for each site, fetched in parallel."""
+    def lookup(site):
+        dedup_id = uri_qid(site.get("dedup_site_uri"))
+        return dedup_deposit_type(dedup_id) if dedup_id else {}
+
+    with ThreadPoolExecutor(DETAIL_WORKERS) as ex:
+        return list(ex.map(lookup, sites))
+
+
+def get_filter_options(
+    papers: list[dict], deposit_types: tuple[str, ...] = ()
+) -> tuple[list[dict], list[dict]]:
+    """Deposit type and country dropdown options for the sites in `papers`.
+
+    With `deposit_types`, countries are limited to sites of those types.
     Values are MinMod ids, which the papers search accepts; labels are names.
     """
     pairs = [(p["paper_id"], e) for p in papers for e in p["elements"]]
     with ThreadPoolExecutor(DETAIL_WORKERS) as ex:
         details = list(ex.map(lambda pair: paper_detail(*pair), pairs))
+    sites = [site for detail in details for site in detail.get("sites", [])]
+    types = site_deposit_types(sites)
 
-    names = get_country_names()
-    countries = {}
-    for detail in details:
-        for site in detail.get("sites", []):
-            for c in (site.get("location_info") or {}).get("country", []):
-                qid = uri_qid(c.get("normalized_uri"))
-                if qid:
-                    countries[qid] = names.get(qid, c.get("observed_name") or qid)
-    return sorted(
-        ({"label": name, "value": qid} for qid, name in countries.items()),
-        key=lambda o: o["label"],
-    )
+    country_names = get_country_names()
+    type_names = get_deposit_type_names()
+    type_options, country_options = {}, {}
+    for site, dtype in zip(sites, types):
+        if dtype.get("id"):
+            type_options[dtype["id"]] = type_names.get(dtype["id"], dtype["id"])
+        if deposit_types and dtype.get("id") not in deposit_types:
+            continue
+        for c in (site.get("location_info") or {}).get("country", []):
+            qid = uri_qid(c.get("normalized_uri"))
+            if qid:
+                country_options[qid] = country_names.get(qid, c.get("observed_name") or qid)
+
+    def options(values):
+        return sorted(
+            ({"label": name, "value": qid} for qid, name in values.items()),
+            key=lambda o: o["label"],
+        )
+
+    return options(type_options), options(country_options)
 
 
 # --------------------------------------------------------------------------
@@ -319,22 +358,25 @@ def get_countries(papers: list[dict]) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def get_papers(commodity: str, country: str | None = None) -> list[dict]:
+def get_papers(
+    commodity: str, country: str | None = None, deposit_types: tuple[str, ...] = ()
+) -> list[dict]:
     """Papers with a reading of `commodity` (a symbol or group), each listing
-    the `elements` it matched. With `country`, a site in that country must
-    have measured the element.
+    the `elements` it matched. With `country` or `deposit_types`, one site
+    must match them and have measured the element.
     """
     elements = expand(commodity)
-    if len(elements) == 1:
-        results = [papers_for_element(elements[0], country)]
-    else:
-        with ThreadPoolExecutor(DETAIL_WORKERS) as ex:
-            results = list(ex.map(lambda e: papers_for_element(e, country), elements))
+    # the API takes one element and one deposit type per request
+    queries = [(e, dt) for e in elements for dt in (deposit_types or [None])]
+    with ThreadPoolExecutor(DETAIL_WORKERS) as ex:
+        results = list(ex.map(lambda q: papers_for_element(q[0], country, q[1]), queries))
 
     papers = {}
-    for element, element_papers in zip(elements, results):
+    for (element, _), element_papers in zip(queries, results):
         for p in element_papers:
-            papers.setdefault(p["paper_id"], {**p, "elements": []})["elements"].append(element)
+            paper = papers.setdefault(p["paper_id"], {**p, "elements": []})
+            if element not in paper["elements"]:
+                paper["elements"].append(element)
 
     papers = list(papers.values())
     papers.sort(
@@ -343,11 +385,16 @@ def get_papers(commodity: str, country: str | None = None) -> list[dict]:
     return papers
 
 
-def papers_for_element(element: str, country: str | None) -> list[dict]:
+@ttl_cache(ttl_seconds=900)
+def papers_for_element(
+    element: str, country: str | None, deposit_type: str | None
+) -> list[dict]:
     """/papers for one element, reduced to the fields the grid shows."""
     params = {"element": element, "include_bdl": "true", "limit": 0}
     if country:
         params["country"] = country
+    if deposit_type:
+        params["deposit_type"] = deposit_type
 
     return [
         {
@@ -361,21 +408,31 @@ def papers_for_element(element: str, country: str | None) -> list[dict]:
     ]
 
 
-def get_deposits(paper_id: str, elements: list[str]) -> list[dict]:
-    """Sites in `paper_id` that measured any of `elements`, each listing which."""
+def get_deposits(
+    paper_id: str, elements: list[str], deposit_types: tuple[str, ...] = ()
+) -> list[dict]:
+    """Sites in `paper_id` that measured any of `elements`, each listing which.
+
+    With `deposit_types`, only sites of those types.
+    """
     sites = {}
     for element in elements:
         for site in paper_detail(paper_id, element).get("sites", []):
             sites.setdefault(site["id"], (site, []))[1].append(element)
+    sites = list(sites.values())
+    types = site_deposit_types([site for site, _ in sites])
+    type_names = get_deposit_type_names()
 
     deposits = []
-    for site, site_elements in sites.values():
+    for (site, site_elements), dtype in zip(sites, types):
+        if deposit_types and dtype.get("id") not in deposit_types:
+            continue
         location = site.get("location_info") or {}
         countries = location.get("country") or []
         states = location.get("state_or_province") or []
 
-        # keep the most confident deposit type candidate
-        best_type = max(
+        # the site's own label, as extracted from the paper
+        reported = max(
             site.get("deposit_type_candidate") or [{}],
             key=lambda d: to_float(d.get("confidence")) or -1.0,
         )
@@ -386,8 +443,9 @@ def get_deposits(paper_id: str, elements: list[str]) -> list[dict]:
                 "deposit_name": site.get("name"),
                 "country": country_name(countries[0]) if countries else None,
                 "state": states[0].get("observed_name") if states else None,
-                "deposit_type_text": best_type.get("observed_name"),
-                "deposit_type_confidence": to_float(best_type.get("confidence")),
+                "deposit_type": type_names.get(dtype.get("id"), dtype.get("id")),
+                "deposit_type_confidence": to_float(dtype.get("confidence")),
+                "reported_deposit_type": reported.get("observed_name"),
                 "elements": site_elements,
             }
         )
